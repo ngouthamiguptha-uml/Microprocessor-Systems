@@ -1,0 +1,20 @@
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Arduino IDE build/cache artifacts
+*.elf
+*.hex
+*.bin
+*.map
+*.d
+*.o
+*.a
+*.so
+*.dll
+*.exe
+
+# local notes
+*.log
