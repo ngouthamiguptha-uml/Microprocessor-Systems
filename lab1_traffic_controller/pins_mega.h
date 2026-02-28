@@ -13,12 +13,18 @@
 // Buzzer
 #define PIN_BUZZER     34
 
-// 74HC595
+// 74HC595 pins (for 7-seg)
 #define PIN_SR_DATA    36
 #define PIN_SR_CLK     38
 #define PIN_SR_LATCH   40
 
-// Keypad (example)
+// Digit select pins (4-digit multiplex)
+#define PIN_DIGIT_0    41
+#define PIN_DIGIT_1    43
+#define PIN_DIGIT_2    45
+#define PIN_DIGIT_3    47
+
+// Keypad 4x4
 #define KEYPAD_R0 42
 #define KEYPAD_R1 44
 #define KEYPAD_R2 46

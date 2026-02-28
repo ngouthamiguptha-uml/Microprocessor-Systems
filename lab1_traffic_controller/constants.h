@@ -1,0 +1,7 @@
+#pragma once
+
+#define YELLOW_SECONDS 3
+#define MIN_DURATION_SECONDS 6
+#define FLASH_WINDOW_SECONDS 3
+#define FLASH_HALF_PERIOD_MS 500
+#define BUZZER_SECONDS 3
