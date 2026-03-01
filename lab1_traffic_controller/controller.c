@@ -3,92 +3,110 @@
 #include "hal.h"
 #include "constants.h"
 
-// =====================
-// FSM states (2-direction)
-// =====================
 typedef enum {
-  ST_EW_GREEN,          // EW moves, NS stopped
-  ST_EW_YELLOW,
-  ST_ALL_RED_AFTER_EW,  // clearance (both red)
-  ST_NS_GREEN,          // NS moves, EW stopped
+  ST_INIT_FLASH,          // power-up red flash until durations set AND '*' pressed
+  ST_NS_GREEN,
   ST_NS_YELLOW,
-  ST_ALL_RED_AFTER_NS,  // clearance (both red)
+  ST_NS_RED,
+  ST_EW_YELLOW,           // EW yellow while NS stays red
+  ST_FAILURE_FLASH,
 
-  // buzzer sub-states (3s warning before each change)
-  ST_BUZZER_TO_EW_YELLOW,
-  ST_BUZZER_TO_ALL_RED_AFTER_EW,
-  ST_BUZZER_TO_NS_GREEN,
-
-  ST_BUZZER_TO_NS_YELLOW,
-  ST_BUZZER_TO_ALL_RED_AFTER_NS,
-  ST_BUZZER_TO_EW_GREEN
+  // buzzer “pre-change” substates
+  ST_BUZZER_TO_YELLOW,
+  ST_BUZZER_TO_RED,
+  ST_BUZZER_TO_GREEN
 } State;
 
-static State st = ST_EW_GREEN;
+static State st = ST_INIT_FLASH;
 
-// durations (can be overridden via keypad later)
-static int red_seconds   = 24;
+// configured durations
+static int red_seconds = 24;
 static int green_seconds = 20;
+static bool red_set = false;
+static bool green_set = false;
+static bool started = false;
 
-// computed clearance so "red total" can equal red_seconds
-static int all_red_seconds = 0;
-
-// countdowns
+// countdown for current light (FSM-driven 1Hz)
 static int seconds_remaining = 0;
-static int buzzer_remaining  = 0;
 
-// flashing support
+// buzzer countdown
+static int buzzer_remaining = 0;
+
+// keypad duration entry
+typedef enum { ENTRY_NONE, ENTRY_RED, ENTRY_GREEN } EntryMode;
+static EntryMode entry_mode = ENTRY_NONE;
+static int entry_value = 0;     // accumulating digits
+static bool hash_armed = false; // for detecting double '#'
+
+// flashing support (0.5s using millis)
 static bool flash_on = false;
 static unsigned long last_flash_ms = 0;
 
-// ---------------------
-// helpers
-// ---------------------
+// Track flash-window entry
+static bool prev_ns_green_flash_window = false;
+static bool prev_ns_red_flash_window   = false;
+static bool prev_ew_green_flash_window = false;
+
 static void set_all_off(void) {
   hal_ns_red(0); hal_ns_yellow(0); hal_ns_green(0);
   hal_ew_red(0); hal_ew_yellow(0); hal_ew_green(0);
-  hal_buzzer_off();
 }
 
-// Apply outputs for the "displayed" phase.
-// Note: buzzer states keep the SAME outputs as the phase they correspond to.
-static void apply_outputs(void) {
+// Synchronization policy (safe):
+// - When NS is GREEN/YELLOW: EW is RED
+// - When NS is RED: EW is GREEN
+// Plus: EW gets a YELLOW phase right before switching to RED
+static void apply_outputs_for_state(void) {
   switch (st) {
-    // EW moving phases (NS stopped)
-    case ST_EW_GREEN:
-    case ST_BUZZER_TO_EW_YELLOW:
-      hal_ns_red(1); hal_ns_yellow(0); hal_ns_green(0);
-      hal_ew_red(0); hal_ew_yellow(0); hal_ew_green(1);
+    case ST_INIT_FLASH:
+      // EW off during init; NS red will be flashed by controller_task()
+      hal_ns_yellow(0); hal_ns_green(0);
+      hal_ew_red(0); hal_ew_yellow(0); hal_ew_green(0);
       break;
 
-    case ST_EW_YELLOW:
-    case ST_BUZZER_TO_ALL_RED_AFTER_EW:
-      hal_ns_red(1); hal_ns_yellow(0); hal_ns_green(0);
-      hal_ew_red(0); hal_ew_yellow(1); hal_ew_green(0);
-      break;
-
-    case ST_ALL_RED_AFTER_EW:
-    case ST_BUZZER_TO_NS_GREEN:
-      hal_ns_red(1); hal_ns_yellow(0); hal_ns_green(0);
-      hal_ew_red(1); hal_ew_yellow(0); hal_ew_green(0);
-      break;
-
-    // NS moving phases (EW stopped)
     case ST_NS_GREEN:
-    case ST_BUZZER_TO_NS_YELLOW:
       hal_ns_red(0); hal_ns_yellow(0); hal_ns_green(1);
       hal_ew_red(1); hal_ew_yellow(0); hal_ew_green(0);
       break;
 
+    // ✅ Requirement B: during buzzer before switching to yellow, GREEN must be OFF (no steady green)
+    case ST_BUZZER_TO_YELLOW:
+      hal_ns_red(0); hal_ns_yellow(0); hal_ns_green(0);   // GREEN OFF during buzzer
+      hal_ew_red(1); hal_ew_yellow(0); hal_ew_green(0);
+      break;
+
     case ST_NS_YELLOW:
-    case ST_BUZZER_TO_ALL_RED_AFTER_NS:
       hal_ns_red(0); hal_ns_yellow(1); hal_ns_green(0);
       hal_ew_red(1); hal_ew_yellow(0); hal_ew_green(0);
       break;
 
-    case ST_ALL_RED_AFTER_NS:
-    case ST_BUZZER_TO_EW_GREEN:
+    case ST_BUZZER_TO_RED:
+      // keep yellow ON while buzzer runs (common behavior)
+      hal_ns_red(0); hal_ns_yellow(1); hal_ns_green(0);
+      hal_ew_red(1); hal_ew_yellow(0); hal_ew_green(0);
+      break;
+
+    case ST_NS_RED:
       hal_ns_red(1); hal_ns_yellow(0); hal_ns_green(0);
+      hal_ew_red(0); hal_ew_yellow(0); hal_ew_green(1);
+      break;
+
+    case ST_BUZZER_TO_GREEN:
+      // keep NS red and EW green while buzzer runs
+      hal_ns_red(1); hal_ns_yellow(0); hal_ns_green(0);
+      hal_ew_red(0); hal_ew_yellow(0); hal_ew_green(0);
+      break;
+
+    case ST_EW_YELLOW:
+      // NS stays RED, EW transitions GREEN->YELLOW
+      hal_ns_red(1); hal_ns_yellow(0); hal_ns_green(0);
+      hal_ew_red(0); hal_ew_yellow(1); hal_ew_green(0);
+      break;
+
+    case ST_FAILURE_FLASH:
+      // failure: “red flashes 0.5s repeatedly”
+      // We flash NS red; keep EW red ON for safety
+      hal_ns_yellow(0); hal_ns_green(0);
       hal_ew_red(1); hal_ew_yellow(0); hal_ew_green(0);
       break;
   }
@@ -97,133 +115,278 @@ static void apply_outputs(void) {
 static void enter_state(State next, int duration_sec) {
   st = next;
   seconds_remaining = duration_sec;
+  apply_outputs_for_state();
+
+  // reset flash timer when entering any state
   flash_on = false;
   last_flash_ms = millis();
-  apply_outputs();
+
+  // reset flash-window trackers so each state transition is clean
+  prev_ns_green_flash_window = false;
+  prev_ns_red_flash_window = false;
+  prev_ew_green_flash_window = false;
 }
 
-static bool is_buzzer_state(State s) {
-  return (s == ST_BUZZER_TO_EW_YELLOW ||
-          s == ST_BUZZER_TO_ALL_RED_AFTER_EW ||
-          s == ST_BUZZER_TO_NS_GREEN ||
-          s == ST_BUZZER_TO_NS_YELLOW ||
-          s == ST_BUZZER_TO_ALL_RED_AFTER_NS ||
-          s == ST_BUZZER_TO_EW_GREEN);
-}
-
-// =====================
-// Public API
-// =====================
 void controller_init(void) {
   set_all_off();
 
-  // clearance to make total red time = red_seconds
-  // (red_seconds = green_seconds + YELLOW_SECONDS + all_red_seconds)
-  all_red_seconds = red_seconds - green_seconds - YELLOW_SECONDS;
-  if (all_red_seconds < 0) all_red_seconds = 0;
+  st = ST_INIT_FLASH;
+  seconds_remaining = 0;
+  buzzer_remaining = 0;
 
-  // Start with EW moving (NS red)
-  enter_state(ST_EW_GREEN, green_seconds);
+  red_set = false;
+  green_set = false;
+  started = false;
+
+  entry_mode = ENTRY_NONE;
+  entry_value = 0;
+  hash_armed = false;
+
+  flash_on = false;
+  last_flash_ms = millis();
+
+  prev_ns_green_flash_window = false;
+  prev_ns_red_flash_window = false;
+  prev_ew_green_flash_window = false;
+
+  apply_outputs_for_state();
 }
 
 int controller_get_seconds_remaining(void) {
-  if (is_buzzer_state(st)) return buzzer_remaining;
+  if (st == ST_BUZZER_TO_YELLOW || st == ST_BUZZER_TO_RED || st == ST_BUZZER_TO_GREEN) {
+    return buzzer_remaining;
+  }
   return seconds_remaining;
 }
 
-void controller_on_key(KeyEvent k) {
-  (void)k;
-}
-
-// Flash last 3 seconds of:
-// - the currently active GREEN
-// - the currently active RED (the stopped direction), during its last 3 seconds
+// 0.5s flashing implemented here using millis() (non-blocking)
 void controller_task(void) {
   unsigned long now = millis();
 
-  // Only flash near the end of a normal (non-buzzer) phase.
-  if (is_buzzer_state(st)) return;
-
-  bool in_flash_window =
-    (seconds_remaining > 0 && seconds_remaining <= FLASH_WINDOW_SECONDS);
-
-  if (!in_flash_window) return;
-
-  if (now - last_flash_ms >= FLASH_HALF_PERIOD_MS) {
-    last_flash_ms = now;
-    flash_on = !flash_on;
-
-    // Flash rules per spec: flash RED and GREEN in their last 3 seconds.
-    // Which lamp is "the red" depends on which direction is stopped.
-
-    if (st == ST_EW_GREEN) {
-      // EW green is active; NS red is active
-      hal_ew_green(flash_on ? 1 : 0);
+  // INIT: 1s flashing NS red
+  if (st == ST_INIT_FLASH) {
+    if (now - last_flash_ms >= 1000) {
+      last_flash_ms = now;
+      flash_on = !flash_on;
       hal_ns_red(flash_on ? 1 : 0);
-    } else if (st == ST_NS_GREEN) {
-      // NS green is active; EW red is active
+    }
+    return;
+  }
+
+  // FAILURE: 0.5s flashing NS red
+  if (st == ST_FAILURE_FLASH) {
+    if (now - last_flash_ms >= FLASH_HALF_PERIOD_MS) {
+      last_flash_ms = now;
+      flash_on = !flash_on;
+      hal_ns_red(flash_on ? 1 : 0);
+    }
+    return;
+  }
+
+  // Flash windows = last 3 seconds (or FLASH_WINDOW_SECONDS) while > 0
+  bool ns_green_flash_window =
+      (st == ST_NS_GREEN) &&
+      (seconds_remaining <= FLASH_WINDOW_SECONDS) &&
+      (seconds_remaining > 0);
+
+  bool ns_red_flash_window =
+      (st == ST_NS_RED) &&
+      (seconds_remaining <= FLASH_WINDOW_SECONDS) &&
+      (seconds_remaining > 0);
+
+  bool ew_green_flash_window =
+      (st == ST_NS_RED) &&
+      (seconds_remaining <= FLASH_WINDOW_SECONDS) &&
+      (seconds_remaining > 0);
+
+  // ---- NS GREEN FLASH (no restore-to-ON after window) ----
+  if (ns_green_flash_window && !prev_ns_green_flash_window) {
+    flash_on = true;      // start ON
+    hal_ns_green(1);
+    last_flash_ms = now;  // reset cadence
+  }
+  if (ns_green_flash_window) {
+    if (now - last_flash_ms >= FLASH_HALF_PERIOD_MS) {
+      last_flash_ms = now;
+      flash_on = !flash_on;
       hal_ns_green(flash_on ? 1 : 0);
-      hal_ew_red(flash_on ? 1 : 0);
-    } else if (st == ST_EW_YELLOW) {
-      // no flash on yellow by spec
-    } else if (st == ST_NS_YELLOW) {
-      // no flash on yellow by spec
-    } else if (st == ST_ALL_RED_AFTER_EW || st == ST_ALL_RED_AFTER_NS) {
-      // both red; if you want, you can flash both reds here, but spec doesn't require it
     }
   }
+
+  // ---- NS RED FLASH ----
+  if (ns_red_flash_window && !prev_ns_red_flash_window) {
+    flash_on = true;      // start ON
+    hal_ns_red(1);
+    last_flash_ms = now;
+  }
+  if (ns_red_flash_window) {
+    if (now - last_flash_ms >= FLASH_HALF_PERIOD_MS) {
+      last_flash_ms = now;
+      flash_on = !flash_on;
+      hal_ns_red(flash_on ? 1 : 0);
+    }
+  }
+
+  // ---- EW GREEN FLASH (mirror same cadence; no restore-to-ON) ----
+  if (ew_green_flash_window && !prev_ew_green_flash_window) {
+    hal_ew_green(1);
+  }
+  if (ew_green_flash_window) {
+    hal_ew_green(flash_on ? 1 : 0);
+  }
+
+  prev_ns_green_flash_window = ns_green_flash_window;
+  prev_ns_red_flash_window = ns_red_flash_window;
+  prev_ew_green_flash_window = ew_green_flash_window;
 }
 
-// 1Hz tick drives state transitions + buzzer delays
-void controller_on_1hz_tick(void) {
-  // Buzzer sub-state behavior: count buzzer, then enter the real next phase.
-  if (is_buzzer_state(st)) {
-    if (buzzer_remaining > 0) buzzer_remaining--;
+static int clamp_duration(int v) {
+  if (v < MIN_DURATION_SECONDS) return MIN_DURATION_SECONDS;
+  if (v > 999) return 999;
+  return v;
+}
 
+// Called once per second by Timer1 tick flag
+void controller_on_1hz_tick(void) {
+  // Buzzer substates count down first
+  if (st == ST_BUZZER_TO_YELLOW || st == ST_BUZZER_TO_RED || st == ST_BUZZER_TO_GREEN) {
+    if (buzzer_remaining > 0) buzzer_remaining--;
     if (buzzer_remaining == 0) {
       hal_buzzer_off();
 
-      // After buzzer, jump to the next *real* phase
-      if (st == ST_BUZZER_TO_EW_YELLOW) {
-        enter_state(ST_EW_YELLOW, YELLOW_SECONDS);
-      } else if (st == ST_BUZZER_TO_ALL_RED_AFTER_EW) {
-        enter_state(ST_ALL_RED_AFTER_EW, all_red_seconds);
-      } else if (st == ST_BUZZER_TO_NS_GREEN) {
-        enter_state(ST_NS_GREEN, green_seconds);
-      } else if (st == ST_BUZZER_TO_NS_YELLOW) {
+      if (st == ST_BUZZER_TO_YELLOW) {
         enter_state(ST_NS_YELLOW, YELLOW_SECONDS);
-      } else if (st == ST_BUZZER_TO_ALL_RED_AFTER_NS) {
-        enter_state(ST_ALL_RED_AFTER_NS, all_red_seconds);
-      } else { // ST_BUZZER_TO_EW_GREEN
-        enter_state(ST_EW_GREEN, green_seconds);
+      } else if (st == ST_BUZZER_TO_RED) {
+        enter_state(ST_NS_RED, red_seconds);
+      } else { // ST_BUZZER_TO_GREEN
+        // Insert EW_YELLOW for 3 seconds (NS stays RED)
+        enter_state(ST_EW_YELLOW, YELLOW_SECONDS);
       }
     }
     return;
   }
 
-  // Normal phase countdown
-  if (seconds_remaining > 0) seconds_remaining--;
+  // Main states countdown
+  if (st == ST_NS_GREEN || st == ST_NS_YELLOW || st == ST_NS_RED || st == ST_EW_YELLOW) {
+    if (seconds_remaining > 0) seconds_remaining--;
 
-  if (seconds_remaining == 0) {
-    // Requirement (8): beep 3 seconds before a light is changed
-    hal_buzzer_on();
-    buzzer_remaining = BUZZER_SECONDS;
+    if (seconds_remaining == 0) {
 
-    // Move into appropriate buzzer state (outputs remain the same)
-    if (st == ST_EW_GREEN) {
-      st = ST_BUZZER_TO_EW_YELLOW;
-    } else if (st == ST_EW_YELLOW) {
-      st = ST_BUZZER_TO_ALL_RED_AFTER_EW;
-    } else if (st == ST_ALL_RED_AFTER_EW) {
-      st = ST_BUZZER_TO_NS_GREEN;
-    } else if (st == ST_NS_GREEN) {
-      st = ST_BUZZER_TO_NS_YELLOW;
-    } else if (st == ST_NS_YELLOW) {
-      st = ST_BUZZER_TO_ALL_RED_AFTER_NS;
-    } else { // ST_ALL_RED_AFTER_NS
-      st = ST_BUZZER_TO_EW_GREEN;
+      // If EW yellow finished, go straight to NS green (NO buzzer here)
+      if (st == ST_EW_YELLOW) {
+        enter_state(ST_NS_GREEN, green_seconds);
+        return;
+      }
+
+      // Before changing a light: buzzer 3 seconds
+      hal_buzzer_on();
+      buzzer_remaining = BUZZER_SECONDS;
+
+      if (st == ST_NS_GREEN) {
+        st = ST_BUZZER_TO_YELLOW;
+      } else if (st == ST_NS_YELLOW) {
+        st = ST_BUZZER_TO_RED;
+      } else { // ST_NS_RED
+        st = ST_BUZZER_TO_GREEN;
+      }
+
+      apply_outputs_for_state();
+    }
+    return;
+  }
+
+  // init/failure states are handled via controller_task() + key events
+}
+
+// Key input handling (durations + start + failure)
+void controller_on_key(KeyEvent k) {
+  // detect double '#'
+  if (k == KEY_HASH) {
+    if (hash_armed) {
+      // double hash => failure mode ONLY from normal operation
+      if (st != ST_INIT_FLASH && st != ST_FAILURE_FLASH) {
+        enter_state(ST_FAILURE_FLASH, 0);
+      }
+      hash_armed = false;
+    } else {
+      hash_armed = true;
+    }
+  } else {
+    hash_armed = false;
+  }
+
+  // In FAILURE mode: durations setting should exit failure and go back to init flashing
+  if (st == ST_FAILURE_FLASH) {
+    if (k == KEY_A || k == KEY_B) {
+      started = false;
+      enter_state(ST_INIT_FLASH, 0);
+    } else {
+      return;
+    }
+  }
+
+  // Duration entry mode selection
+  if (k == KEY_A) {
+    entry_mode = ENTRY_RED;
+    entry_value = 0;
+    return;
+  }
+  if (k == KEY_B) {
+    entry_mode = ENTRY_GREEN;
+    entry_value = 0;
+    return;
+  }
+
+  // Start operation only when both durations set and '*' pressed
+  if (k == KEY_STAR) {
+    if (red_set && green_set) {
+      started = true;
+      enter_state(ST_NS_RED, red_seconds);
+    }
+    return;
+  }
+
+  // Digit accumulation
+  int digit = -1;
+  switch (k) {
+    case KEY_0: digit = 0; break;
+    case KEY_1: digit = 1; break;
+    case KEY_2: digit = 2; break;
+    case KEY_3: digit = 3; break;
+    case KEY_4: digit = 4; break;
+    case KEY_5: digit = 5; break;
+    case KEY_6: digit = 6; break;
+    case KEY_7: digit = 7; break;
+    case KEY_8: digit = 8; break;
+    case KEY_9: digit = 9; break;
+    default: break;
+  }
+
+  if (digit >= 0 && entry_mode != ENTRY_NONE) {
+    entry_value = entry_value * 10 + digit;
+    if (entry_value > 999) entry_value = 999;
+    return;
+  }
+
+  // Confirm entry with '#'
+  if (k == KEY_HASH && entry_mode != ENTRY_NONE) {
+    int v = clamp_duration(entry_value);
+
+    if (entry_mode == ENTRY_RED) {
+      red_seconds = v;
+      red_set = true;
+    } else if (entry_mode == ENTRY_GREEN) {
+      green_seconds = v;
+      green_set = true;
     }
 
-    apply_outputs(); // keep current lights during buzzer
+    entry_mode = ENTRY_NONE;
+    entry_value = 0;
+
+    // Stay in init flashing until '*' is pressed after both are set
+    if (!started) {
+      enter_state(ST_INIT_FLASH, 0);
+    }
+    return;
   }
 }
