@@ -1,5 +1,6 @@
 #include "hal.h"
 
+// Level A requirement:
 // - GPIO init and output toggling done in AVR assembly (traffic_io.S)
 // - FSM/timing remains in C
 

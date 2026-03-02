@@ -1,7 +1,7 @@
 #include "seg7.h"
 #include <Arduino.h>
 
-// Bit mapping:
+// Bit mapping you are effectively using (after your real wiring):
 // bit7=A, bit6=B, bit5=C, bit4=D, bit3=E, bit2=F, bit1=G, bit0=DP
 // Active-HIGH segments (1 = ON)
 

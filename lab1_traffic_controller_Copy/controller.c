@@ -69,7 +69,7 @@ static void apply_outputs_for_state(void) {
       hal_ew_red(1); hal_ew_yellow(0); hal_ew_green(0);
       break;
 
-    // During buzzer before switching to yellow, GREEN must be OFF (no steady green)
+    // ✅ Requirement B: during buzzer before switching to yellow, GREEN must be OFF (no steady green)
     case ST_BUZZER_TO_YELLOW:
       hal_ns_red(0); hal_ns_yellow(0); hal_ns_green(0);   // GREEN OFF during buzzer
       hal_ew_red(1); hal_ew_yellow(0); hal_ew_green(0);
@@ -81,7 +81,7 @@ static void apply_outputs_for_state(void) {
       break;
 
     case ST_BUZZER_TO_RED:
-      // keep yellow ON while buzzer runs 
+      // keep yellow ON while buzzer runs (common behavior)
       hal_ns_red(0); hal_ns_yellow(1); hal_ns_green(0);
       hal_ew_red(1); hal_ew_yellow(0); hal_ew_green(0);
       break;
@@ -159,7 +159,7 @@ int controller_get_seconds_remaining(void) {
   return seconds_remaining;
 }
 
-// 0.5s flashing implemented here using millis()
+// 0.5s flashing implemented here using millis() (non-blocking)
 void controller_task(void) {
   unsigned long now = millis();
 

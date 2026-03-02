@@ -3,7 +3,7 @@
 // Fixed yellow duration
 #define YELLOW_SECONDS 3
 
-// Minimum allowed red/green 
+// Minimum allowed red/green (avoid weird cases)
 #define MIN_DURATION_SECONDS 6
 
 // Flash timing for last 3 seconds

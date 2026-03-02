@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 // Hardware abstraction layer for the traffic controller.
-// Mixed C + AVR assembly (Arduino Mega).
+// Mixed C + AVR assembly (ATmega2560 / Arduino Mega).
 
 #ifdef __cplusplus
 extern "C" {
